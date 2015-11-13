@@ -34,6 +34,7 @@ import re
 import signal
 import sys
 import tokenize
+import collections
 from distutils import sysconfig
 
 import pyflakes.api
@@ -96,7 +97,7 @@ def unused_import_line_numbers(messages):
     """Yield line numbers of unused imports."""
     for message in messages:
         if isinstance(message, pyflakes.messages.UnusedImport):
-            yield message.lineno
+            yield message.lineno, message.message_args
 
 
 def unused_variable_line_numbers(messages):
@@ -293,7 +294,7 @@ class AutoFlake(object):
         self.remove_unused_variables = remove_unused_variables
         self.remove_all_unused_imports = remove_all_unused_imports
 
-    def break_up_import(self, line):
+    def break_up_import(self, line, unused_imports):
         """Return line with imports on separate lines."""
         assert '\\' not in line
         assert '(' not in line
@@ -308,19 +309,25 @@ class AutoFlake(object):
         (indentation, imports) = re.split(pattern=r'\bimport\b',
                                           string=line, maxsplit=1)
 
-        indentation += 'import '
         assert newline
 
-        return ''.join([indentation + i.strip() + newline
-                        for i in sorted(imports.split(','))])
+        imports = [ i.strip() for i in imports.split(',') ]
+        imports = [ i for i in imports if i not in unused_imports or i in unused_imports and (not self.remove_all_unused_imports or i in self.imports ) ]
+
+        if not imports:
+            return get_indentation(line)+'pass'+newline
+
+        return indentation + 'import ' + ', '.join( imports ) + newline
 
 
     def filter_code(self, source):
         """Yield code with unused imports removed."""
         messages = check(source)
 
-        marked_import_line_numbers = frozenset(
-            unused_import_line_numbers(messages))
+        marked_import_line_numbers = collections.defaultdict(tuple)
+        for line, imports in unused_import_line_numbers(messages):
+            marked_import_line_numbers[line] += imports
+
 
         if self.remove_unused_variables:
             marked_variable_line_numbers = frozenset(
@@ -336,7 +343,8 @@ class AutoFlake(object):
             elif line_number in marked_import_line_numbers:
                 yield self.filter_unused_import(
                     line,
-                    previous_line=previous_line)
+                    previous_line=previous_line,
+                    unused_imports=marked_import_line_numbers[line_number])
             elif line_number in marked_variable_line_numbers:
                 yield self.filter_unused_variable(line)
             else:
@@ -345,12 +353,12 @@ class AutoFlake(object):
             previous_line = line
 
 
-    def filter_unused_import(self, line, previous_line=''):
+    def filter_unused_import(self, line, previous_line='', unused_imports=[]):
         """Return line if used, otherwise return None."""
         if multiline_import(line, previous_line):
             return line
         elif ',' in line:
-            return self.break_up_import(line)
+            return self.break_up_import(line, unused_imports)
         else:
             package = extract_package_name(line)
             if not self.remove_all_unused_imports and package not in self.imports:
